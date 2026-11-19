@@ -473,11 +473,11 @@ sub dsp_descriptor {
           push @dsp, sprintf "  Sync Type%17s", (qw/None Async Adaptation Sync/)[($value >> 2) & 3];
           push @dsp, sprintf "  Usage Type%16s", (qw/Data Implicit Explicit [unknown]/)[($value >> 4) & 3];
         }
-        elsif ($desc->{bDescriptorSubtype} // 0 == 0x01) { # CMD
+        elsif (($desc->{bDescriptorSubtype} // 0) == 0x01) { # CMD
           push @dsp, (' ' x 25)."b:1 call management"    if $value & 0x02;
           push @dsp, (' ' x 25)."b:0 use DataInterface"  if $value & 0x01;
         }
-        elsif ($desc->{bDescriptorSubtype} // 0 == 0x02) { # ACM
+        elsif (($desc->{bDescriptorSubtype} // 0) == 0x02) { # ACM
           push @dsp, (' ' x 25)."b:3 NETWORK_CONNECTION" if $value & 0x08;
           push @dsp, (' ' x 25)."b:2 SEND_BREAK"         if $value & 0x04;
           push @dsp, (' ' x 25)."b:1 LINE_CODING, SERIAL_STATE"  if $value & 0x02;
