@@ -1,6 +1,8 @@
 # Perl-Collection
 
-Perl用の雑多なスクリプト
+Perl用の雑多なスクリプト。なんならOSだって書ける。
+
+> いずれも Artistic License 2.0 と MIT License を選択可
 
 ## Binary category
 
