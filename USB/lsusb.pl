@@ -10,7 +10,7 @@ use USB::LibUSB;
 # use YAML::XS;
 # use Data::Dumper;
 use Getopt::Std;
-my %opts; getopts("hvVd:s:", \%opts) or exit($? || 1);
+getopts("hvVd:s:", \my %opts) or exit($? || 1);
 
 ### Usage Display
 sub usage {
@@ -45,21 +45,13 @@ if ($opts{V}) {
 }
 
 ### Descriptor Description
-my @speed_list = (
-  "[unknown]",
-  "Low Speed (1.5Mbps)",
-  "Full Speed (12Mbps)",
-  "High Speed (480Mbps)",
-  "Super Speed (5Gbps)",
-  "Super Speed (10Gbps)",
-  "Super Speed (10Gbps x2)",
-);
 my %desc_name = (
   0x01=>"Device ",
   0x02=>"Configuration ",
   0x03=>"String ",
   0x04=>"Interface ",
   0x05=>"Endpoint ",
+  0x06=>"Device Qualifier ",
   0x07=>"Other Speed Configuration ",
   0x08=>"Interface Power ",
   0x09=>"OTG ",
@@ -117,6 +109,27 @@ my %desc_list = (
     [bmAttributes=>5],
     [wMaxPacketSize=>0],
     [bInterval=>0],
+  ],
+  0x06=>[ # Device Qualifier
+    [bLength=>0],
+    [bDescriptorType=>6],
+    [bcdUSB=>2,2],
+    [bDeviceClass=>0],
+    [bDeviceSubClass=>0],
+    [bDeviceProtocol=>0],
+    [bMaxPacketSize0=>0],
+    [bNumConfigurations=>0],
+    [bReserved=>0],
+  ],
+  0x07=>[ # Other Speed Configuration
+    [bLength=>0],
+    [bDescriptorType=>6],
+    [wTotalLength=>0,2],
+    [bNumInterfaces=>0],
+    [bConfigurationValue=>0],
+    [iConfiguration=>3],
+    [bmAttributes=>5],
+    [iMaxPower=>4],
   ],
   0x0B=>[ # IAD
     [bLength=>0],
@@ -371,35 +384,16 @@ my %class_desc = (
   0xFF=>{name=>"Vendor Specific"},
 );
 
-### Device Display Header
-sub dsp_device_header {
-  my $dev = shift;
-  $dev->{apps} //= {  # Application Information Retention
-    iManufacturer => '',
-    iProduct      => '',
-    iSerial       => '',
-    bcdUSB        => 0,
-  };
-  my $desc = $dev->get_device_descriptor();
-  $dev->{apps}{bcdUSB} = $desc->{bcdUSB} - 0;
-  if (my $handle = $dev->open()) {
-    $dev->{apps}{iManufacturer} = $handle->get_string_descriptor_ascii($desc->{iManufacturer}, 80) if $desc->{iManufacturer};
-    $dev->{apps}{iProduct}      = $handle->get_string_descriptor_ascii($desc->{iProduct},      80) if $desc->{iProduct};
-    $dev->{apps}{iSerialNumber} = $handle->get_string_descriptor_ascii($desc->{iSerialNumber}, 80) if $desc->{iSerialNumber};
-    $handle->close();
-  }
-  return sprintf("Bus %03d Device %03d: ID %04x:%04x %s",
-    $dev->get_bus_number(),
-    $dev->get_device_address(),
-    $desc->{idVendor},
-    $desc->{idProduct},
-    $dev->{apps}{iProduct} || $dev->{apps}{iManufacturer},
-  );
-}
+### Functions
 
 sub say_tab {
   my $tab = shift;
   say ' ' x $tab, @_;
+}
+
+sub dsp_bcd_num {
+  my $bcd = shift;
+  return sprintf "%x.%02x", $bcd >> 8, $bcd & 255;
 }
 
 sub mk_desc {
@@ -463,7 +457,7 @@ sub dsp_descriptor {
         else {
           push @dsp, sprintf "%-24s0x%02x (0b%08b)", $label, $value, $value;
         }
-        if ($desc->{bDescriptorType} == 0x02) {       # CONFIGURATION
+        if ($desc->{bDescriptorType} == 0x02 || $desc->{bDescriptorType} == 0x07) { # CONFIGURATION
           push @dsp, (' ' x 25)."b:7 BUS_POWERED"   if $value & 0x80;
           push @dsp, (' ' x 25)."b:6 SELF_POWERED"  if $value & 0x40;
           push @dsp, (' ' x 25)."b:5 REMOTE_WAKEUP" if $value & 0x20;
@@ -509,9 +503,8 @@ sub dsp_descriptor {
             $string = $dev->{apps}{$label};
           }
           elsif ($value) {
-            if (my $handle = $dev->open()) {
+            if (my $handle = $dev->{apps}{handle}) {
               $string = $handle->get_string_descriptor_ascii($value, 252);
-              $handle->close();
             }
           }
           $dsp[-1] .= sprintf " [%d] ", 2 * length $string;
@@ -561,7 +554,7 @@ sub dsp_descriptor {
               $dsp[-1] .= " ".$class_desc{$value}{name};
             }
           }
-          elsif ($label eq "bMaxPacketSize0" && $dev->{apps}{bcdUSB} >= 0x300) {
+          elsif ($label eq "bMaxPacketSize0" && $desc->{bcdUSB} >= 0x300) {
             $dsp[-1] .= sprintf " => %d", 2 ** $value;
           }
         }
@@ -690,9 +683,8 @@ sub dsp_func_desc {
       }
       foreach my $req (@hid) {
         say_tab $tab+2, "Raw Descriptor: ", $req->[4], " - ", $desc_name{$req->[2] >> 8} // "";
-        if (my $handle = $dev->open()) {
+        if (my $handle = $dev->{apps}{handle}) {
           my $raw = eval { $handle->control_transfer_read(@$req); };
-          $handle->close();
           unless ($raw) {
             say_tab $tab+4, "### INVALID READ ###";
             next;
@@ -710,7 +702,7 @@ sub dsp_func_desc {
     }
     elsif ($data[1] == 0x0B) {  # IAD
       my $subd = mk_desc $desc_list{0x0B}, @data;
-      dsp_descriptor $tab+2, $dev, $subd, $desc_list{0x0B};
+      dsp_descriptor $tab, $dev, $subd, $desc_list{0x0B};
     }
   }
 }
@@ -759,43 +751,126 @@ for my $dev (reverse $ctx->get_device_list()) {
     else { next unless $dev->get_device_address() == $opts{s} - 0; }
   }
 
-  say dsp_device_header $dev;
+  my ($raw, $req, $handle);
+  $handle = $dev->open();
 
-  if ($opts{v}) {
-    my $config = $dev->get_active_config_descriptor();
+  $dev->{apps} //= {  # Application Information Retention
+    iManufacturer => '',
+    iProduct      => '',
+    iSerial       => '',
+    handle        => $handle,
+    bcdUSB        => $desc->{bcdUSB} - 0,
+  };
 
-    # Device
-    say_tab 2, "Negotiated speed: ", $speed_list[$dev->get_device_speed()];
-    dsp_descriptor 4, $dev, $desc, $desc_list{0x01}, '';
+  if ($handle) {
+    $dev->{apps}{iManufacturer} = $handle->get_string_descriptor_ascii($desc->{iManufacturer}, 250) if $desc->{iManufacturer};
+    $dev->{apps}{iProduct}      = $handle->get_string_descriptor_ascii($desc->{iProduct},      250) if $desc->{iProduct};
+    $dev->{apps}{iSerialNumber} = $handle->get_string_descriptor_ascii($desc->{iSerialNumber}, 250) if $desc->{iSerialNumber};
+  }
 
-    # BOS
-    if ($dev->{apps}{bcdUSB} >= 0x201 and my $handle = $dev->open) {
-      my $bos = eval { $handle->get_bos_descriptor(); };
-      $handle->close();
-      dsp_bos_desc 4, $dev, $bos if $bos;
+  say sprintf("Bus %03d Device %03d: ID %04x:%04x %s",
+    $dev->get_bus_number(),
+    $dev->get_device_address(),
+    $desc->{idVendor},
+    $desc->{idProduct},
+    $dev->{apps}{iProduct} || $dev->{apps}{iManufacturer},
+  );
+
+  next unless $opts{v};
+
+  ### Increase verbosity (show descriptors)
+
+  say_tab 2, "Descriptor version number: ", dsp_bcd_num $dev->{apps}{bcdUSB};
+  say_tab 2, "Negotiated speed: ", (
+    "[unknown]",
+    "Low Speed (1.5Mbps)",
+    "Full Speed (12Mbps)",
+    "High Speed (480Mbps)",
+    "Super Speed (5Gbps)",
+    "Super Speed (10Gbps)",
+    "Super Speed (10Gbps x2)",
+  )[$dev->get_device_speed()];
+
+  # Device
+  dsp_descriptor 4, $dev, $desc, $desc_list{0x01}, '';
+
+  # BOS
+  if ($dev->{apps}{bcdUSB} >= 0x201 and $handle) {
+    my $bos = eval { $handle->get_bos_descriptor(); };
+    dsp_bos_desc 4, $dev, $bos if $bos;
+  }
+
+  # Configuration
+  my $config = $dev->get_active_config_descriptor();
+  $config->{iMaxPower} = $config->{MaxPower}; # rename
+  dsp_descriptor 4, $dev, $config, $desc_list{0x02},
+    sprintf("#%d", $config->{bConfigurationValue});
+
+  # Interface
+  foreach my $interface (@{$config->{interface}}) {
+    # Current and Alternative
+    foreach my $if (@$interface) {
+      dsp_descriptor 6, $dev, $if, $desc_list{0x04},
+        sprintf("#%d,%d", $if->{bInterfaceNumber}, $if->{bAlternateSetting});
+      
+      # Function
+      dsp_func_desc 6, $dev, $if if $if->{extra};
+
+      # Endpoint
+      dsp_ep_desc 6, $dev, @{$if->{endpoint}} if $if->{endpoint};
     }
+  }
 
-    # Configuration
-    $config->{iMaxPower} = $config->{MaxPower}; # rename
-    dsp_descriptor 4, $dev, $config, $desc_list{0x02},
-      sprintf("#%d", $config->{bConfigurationValue});
+  # Device Qualifier
+  while ($handle && ($dev->{apps}{bcdUSB} >> 8) >= 2) {
+    $req = [
+      0x81,         # bmRequestType
+      0x06,         # bRequest
+      0x0600,       # wValue
+      0,            # wIndex
+      10,           # wLength
+      1000,         # timeout
+    ];
+    $raw = eval { $handle->control_transfer_read(@$req); };
+    last unless $raw;
 
-    # Interface
-    foreach my $interface (@{$config->{interface}}) {
-      # Current and Alternative
-      foreach my $if (@$interface) {
-        dsp_descriptor 6, $dev, $if, $desc_list{0x04},
-          sprintf("#%d,%d", $if->{bInterfaceNumber}, $if->{bAlternateSetting});
-        
-        # Function
-        dsp_func_desc 6, $dev, $if if $if->{extra};
+    my $subd = mk_desc $desc_list{0x06}, unpack "C*", $raw;
+    dsp_descriptor 4, $dev, $subd, $desc_list{0x06}, '';
 
-        # Endpoint
-        dsp_ep_desc 6, $dev, @{$if->{endpoint}} if $if->{endpoint};
+    # Other Speed Configuration
+    $req->[2] = 0x0700;
+    $req->[4] = 9;
+    $raw = eval { $handle->control_transfer_read(@$req); };
+    last unless $raw;
+
+    $subd = mk_desc $desc_list{0x07}, unpack "C*", $raw;
+    dsp_descriptor 4, $dev, $subd, $desc_list{0x07},
+      sprintf("#%d", $subd->{bConfigurationValue});
+    last unless $subd->{wTotalLength} > 9;
+
+    $req->[4] = $subd->{wTotalLength};
+    $raw = eval { $handle->control_transfer_read(@$req); };
+    last unless $raw;
+
+    # Other Interface...
+    my @data = unpack "C*", $raw;
+    splice @data, 0, 9;
+    while (@data) {
+      my @raw = splice @data, 0, $data[0];
+      if (exists $desc_list{$raw[1]}) {
+        $subd = mk_desc $desc_list{$raw[1]}, @raw;
+        my $tab = $raw[1] == 4 ? 6 : $raw[1] == 5 ? 8 : 10;
+        dsp_descriptor $tab, $dev, $subd, $desc_list{$raw[1]}, '';
+      }
+      else {
+        say_tab 6, $raw[1] == 0x24 ? "Function" : "Raw", " Descriptor: ", $raw[0];
+        hexdump 8, \@raw;
       }
     }
-    say '';
+    last;
   }
+
+  say '';
 }
 $ctx->exit();
 exit(0);
